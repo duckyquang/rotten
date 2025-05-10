@@ -1,11 +1,9 @@
-export const runtime = 'nodejs';
-import { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import * as pdfParse from 'pdf-parse';
+import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
-import { ollamaService } from '../../../services/ollamaService.mjs';
 
 // Cache for storing recent conversion results
 const conversionCache = new Map<string, {
@@ -54,65 +52,74 @@ const generateCacheKey = (content: string, instructions: string): string => {
   return `${contentHash}-${instructionsHash}`;
 };
 
-export async function POST(request: NextRequest) {
+// Helper functions for text extraction
+async function extractTextFromPDF(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const pdfData = await pdfParse(Buffer.from(buffer));
+  return pdfData.text;
+}
+
+async function extractTextFromDOCX(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ buffer: Buffer.from(buffer) });
+  return result.value;
+}
+
+export async function POST(request: Request) {
   try {
-    const data = await request.formData();
-    const file = data.get('file') as File;
-    const instructions = (data.get('instructions') as string) || '';
+    // Get form data
+    const formData = await request.formData();
+    const file = formData.get('file') as File;
+    const instructions = formData.get('instructions') as string;
 
+    // Validate file exists
     if (!file) {
-      return new Response(
-        JSON.stringify({ error: 'No file provided' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
+      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    // Extract file content based on file type
-    const fileBuffer = await file.arrayBuffer();
-    let fileContent = '';
-
-    if (file.name.toLowerCase().endsWith('.pdf')) {
-      // Extract text from PDF
-      const pdfData = await pdfParse(Buffer.from(fileBuffer));
-      fileContent = pdfData.text;
-    } else if (file.name.toLowerCase().endsWith('.docx')) {
-      // Extract text from DOCX
-      const result = await mammoth.extractRawText({ buffer: Buffer.from(fileBuffer) });
-      fileContent = result.value;
-    } else {
-      // For other file types, try direct text extraction
-      fileContent = new TextDecoder().decode(fileBuffer);
+    // Extract text based on file type
+    let text = '';
+    try {
+      if (file.type === 'application/pdf') {
+        text = await extractTextFromPDF(file);
+      } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        text = await extractTextFromDOCX(file);
+      } else {
+        return NextResponse.json({ error: 'Unsupported file type. Please upload a PDF or DOCX file.' }, { status: 400 });
+      }
+    } catch (err) {
+      console.error('Text extraction error:', err);
+      return NextResponse.json({ error: 'Failed to extract text from file. Please ensure the file is not corrupted.' }, { status: 400 });
     }
 
-    // Validate extracted content
-    if (!fileContent || fileContent.trim().length === 0) {
-      return new Response(
-        JSON.stringify({ error: 'No text content could be extracted from the file' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
+    // Validate extracted text
+    if (!text || text.trim().length === 0) {
+      return NextResponse.json({ error: 'No text content found in file' }, { status: 400 });
     }
 
-    // Generate efficient cache key
-    const cacheKey = generateCacheKey(fileContent, instructions);
+    // Generate cache key
+    const cacheKey = generateCacheKey(text, instructions);
 
     // Check cache
     const cachedResult = conversionCache.get(cacheKey);
     if (cachedResult) {
       // Clean up expired entries occasionally
       if (Math.random() < 0.1) cleanupCache();
-      return new Response(
-        JSON.stringify(cachedResult.result),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
+      return NextResponse.json(cachedResult.result);
     }
 
+    // Process content
     try {
-      // Process content and get both versions
-      const result = await ollamaService.processContent(
-        `${fileContent}\n\nInstructions: ${instructions}`
-      );
+      // Dynamically import ollamaService
+      const { ollamaService } = await import('../../../services/ollamaService.mjs');
+      const result = await ollamaService.processContent(text);
+      
+      // Validate result
+      if (!result || !result.student || !result.teacher) {
+        throw new Error('Failed to generate content');
+      }
 
-      // Store in cache
+      // Cache result
       conversionCache.set(cacheKey, {
         result,
         timestamp: Date.now(),
@@ -121,35 +128,17 @@ export async function POST(request: NextRequest) {
       // Clean up cache occasionally
       if (Math.random() < 0.1) cleanupCache();
 
-      return new Response(
-        JSON.stringify(result),
-        { 
-          status: 200, 
-          headers: { 
-            'Content-Type': 'application/json',
-            'Cache-Control': 'private, max-age=300' // 5 minutes browser cache
-          } 
-        }
-      );
-    } catch (error) {
-      // Handle specific errors from ollamaService
-      return new Response(
-        JSON.stringify({ 
-          student: `Error: ${error.message}. Please try again.`,
-          teacher: `Error: ${error.message}. Please try again.`
-        }),
-        { status: 422, headers: { 'Content-Type': 'application/json' } }
-      );
+      return NextResponse.json(result);
+    } catch (err) {
+      console.error('Content processing error:', err);
+      return NextResponse.json({ 
+        error: err instanceof Error ? err.message : 'Failed to process content. Please try again.' 
+      }, { status: 500 });
     }
-
-  } catch (error) {
-    console.error('Conversion error:', error);
-    return new Response(
-      JSON.stringify({ 
-        student: 'Error: Failed to process file. Please try again.',
-        teacher: 'Error: Failed to process file. Please try again.'
-      }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    );
+  } catch (err) {
+    console.error('API route error:', err);
+    return NextResponse.json({ 
+      error: 'An unexpected error occurred. Please try again.' 
+    }, { status: 500 });
   }
 } 

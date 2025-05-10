@@ -24,7 +24,7 @@ Convert boring educational content into engaging Gen-Z style explanations! Rotte
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/duckyquang/rotten
+git clone https://github.com/duckyquang/rotten.git
 cd rotten
 ```
 

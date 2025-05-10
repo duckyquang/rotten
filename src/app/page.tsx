@@ -41,6 +41,7 @@ export default function Home() {
 
     setIsConverting(true);
     setError('');
+    setResults(null);
 
     try {
       const formData = new FormData();
@@ -53,20 +54,30 @@ export default function Home() {
         signal: abortController.signal
       });
 
-      if (!response.ok) {
-        throw new Error('Conversion failed');
+      const data = await response.json();
+
+      // Check if the response contains an error message
+      if (!response.ok || data.error) {
+        throw new Error(data.error || 'Conversion failed');
+      }
+      
+      // Check if we got valid student and teacher versions
+      if (!data.student || !data.teacher || 
+          data.student.includes('Error:') || 
+          data.teacher.includes('Error:')) {
+        throw new Error('Failed to generate content. Please try again.');
       }
 
-      const data = await response.json();
-      
       // Only update state if this is still the current request
       if (currentRequestRef.current === abortController) {
         setResults(data);
       }
     } catch (err) {
+      console.error('Conversion error:', err);
       // Only update error if this is still the current request
       if (currentRequestRef.current === abortController) {
         setError(err instanceof Error ? err.message : 'Failed to convert file. Please try again.');
+        setResults(null);
       }
     } finally {
       // Only update converting state if this is still the current request
@@ -129,6 +140,13 @@ export default function Home() {
           <h1 className="text-6xl font-bold">rotten.</h1>
           <p className="text-xl">turn your educational material into brainrot</p>
         </div>
+
+        {/* Error Message */}
+        {error && (
+          <div className="text-red-500 text-center p-4 bg-red-500/10 rounded-lg border border-red-500">
+            {error}
+          </div>
+        )}
 
         {/* Upload Container */}
         <div 
@@ -273,11 +291,6 @@ export default function Home() {
               )}
             </button>
           </div>
-        )}
-
-        {/* Error Message */}
-        {error && (
-          <p className="text-red-500 text-center text-lg">{error}</p>
         )}
       </div>
     </main>
